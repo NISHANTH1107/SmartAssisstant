@@ -1,0 +1,13 @@
+streamlit
+python-dotenv
+wikipedia
+PyPDF2
+python-docx
+python-pptx
+langchain
+sentence-transformers
+faiss-cpu
+transformers
+huggingface-hub
+google-generativeai
+openai
