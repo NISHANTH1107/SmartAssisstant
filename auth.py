@@ -1,0 +1,141 @@
+import streamlit as st
+import yaml
+from yaml.loader import SafeLoader
+import streamlit_authenticator as stauth
+from streamlit_authenticator.utilities.hasher import Hasher
+from pathlib import Path
+
+# Configuration file path
+CONFIG_FILE = Path("./config.yaml")
+
+def init_config():
+    if not CONFIG_FILE.exists():
+        # Create default config with hashed passwords
+        config = {
+            'credentials': {
+                'usernames': {
+                    'demo_user': {
+                        'email': 'demo@example.com',
+                        'name': 'Demo User',
+                        'password': Hasher.hash_list(['demo123'])[0]  # Password: demo123
+
+                    }
+                }
+            },
+            'cookie': {
+                'expiry_days': 30,
+                'key': 'studymate_signature_key',  
+                'name': 'studymate_cookie'
+            },
+            'preauthorized': {
+                'emails': []  # Emails that can register
+            }
+        }
+        
+        with open(CONFIG_FILE, 'w') as file:
+            yaml.dump(config, file, default_flow_style=False)
+    
+    # Load config
+    with open(CONFIG_FILE) as file:
+        config = yaml.load(file, Loader=SafeLoader)
+    
+    return config
+
+def save_config(config):
+    with open(CONFIG_FILE, 'w') as file:
+        yaml.dump(config, file, default_flow_style=False)
+
+def get_authenticator():
+    config = init_config()
+    
+    authenticator = stauth.Authenticate(
+        config['credentials'],
+        config['cookie']['name'],
+        config['cookie']['key'],
+        config['cookie']['expiry_days']
+    )
+    
+    return authenticator, config
+
+def register_new_user(authenticator, config):
+    try:
+        success = authenticator.register_user(
+            location='main',
+            fields={
+                'Form name': 'Register User',
+                'Email': 'Email',
+                'Username': 'Username',
+                'Password': 'Password',
+                'Repeat password': 'Repeat password',
+                'Password hint': 'Password hint',
+                'Captcha': 'Captcha',
+                'Register': 'Register',
+            }
+        )
+    except TypeError:
+        try:
+            success = authenticator.register_user(location='main')
+        except Exception as e:
+            st.error(f"Registration failed (auth API mismatch): {e}")
+            return False
+
+    if success:
+        try:
+            save_config(config)
+        except Exception as e:
+            st.error(f"Failed to save config after registration: {e}")
+            return False
+
+        st.success('User registered successfully! Please login.')
+        return True
+
+    # Failed
+    return False
+
+
+def reset_password(authenticator, config, username):
+    try:
+        # Use location='main' for the form
+        if authenticator.reset_password(username, location='main'):
+            save_config(config)
+            st.success('Password modified successfully!')
+            return True
+    except Exception as e:
+        st.error(f'Password reset failed: {e}')
+    return False
+
+def forgot_password(authenticator, config):
+    try:
+        username, email, random_password = authenticator.forgot_password(location='main')
+        if username:
+            save_config(config)
+            st.success(f'New password: {random_password}')
+            st.info('Please use this password to login and change it immediately.')
+            return True
+        elif username == False:
+            st.error('Username not found')
+    except Exception as e:
+        st.error(f'Error: {e}')
+    return False
+
+def forgot_username(authenticator, config):
+    try:
+        username, email = authenticator.forgot_username(location='main')
+        if username:
+            st.success(f'Your username is: {username}')
+            return True
+        elif username == False:
+            st.error('Email not found')
+    except Exception as e:
+        st.error(f'Error: {e}')
+    return False
+
+def update_user_details(authenticator, config, username):
+    try:
+        if authenticator.update_user_details(username, location='main'):
+            save_config(config)
+            st.success('Details updated successfully!')
+            return True
+    except Exception as e:
+        st.error(f'Update failed: {e}')
+    return False

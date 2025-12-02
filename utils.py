@@ -1,4 +1,3 @@
-# utils.py
 import os
 import json
 from pathlib import Path
@@ -10,6 +9,13 @@ from PyPDF2 import PdfReader
 from docx import Document as DocxDocument
 from pptx import Presentation
 import pandas as pd
+try:
+    import pytesseract
+    from PIL import Image
+    import pdf2image
+    OCR_AVAILABLE = True
+except ImportError:
+    OCR_AVAILABLE = False
 
 # LangChain & FAISS
 from langchain.text_splitter import RecursiveCharacterTextSplitter
@@ -17,20 +23,11 @@ from langchain.embeddings import HuggingFaceEmbeddings
 from langchain.vectorstores import FAISS
 from langchain.docstore.document import Document
 
-# Gemini
 import google.generativeai as genai
 
 load_dotenv()
 
-# ===== CONFIGURATION =====
 DATA_DIR = Path("./data")
-UPLOAD_DIR = DATA_DIR / "uploads"
-INDEX_DIR = DATA_DIR / "indexes"
-CHAT_DIR = DATA_DIR / "chats"
-
-# Create directories
-for directory in [UPLOAD_DIR, INDEX_DIR, CHAT_DIR]:
-    directory.mkdir(parents=True, exist_ok=True)
 
 # Configure Gemini
 GEMINI_KEY = os.getenv("GEMINI_API_KEY")
@@ -42,15 +39,46 @@ genai.configure(api_key=GEMINI_KEY)
 # Embedding model
 EMBEDDINGS = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
 
+# ===== USER-SPECIFIC DIRECTORIES =====
+def get_user_dirs(username: str):
+    user_dir = DATA_DIR / "users" / username
+    return {
+        'upload_dir': user_dir / "uploads",
+        'index_dir': user_dir / "indexes",
+        'chat_dir': user_dir / "chats"
+    }
+
+def init_user_dirs(username: str):
+    dirs = get_user_dirs(username)
+    for directory in dirs.values():
+        directory.mkdir(parents=True, exist_ok=True)
+    return dirs
+
 # ===== FILE EXTRACTION =====
 def extract_text_from_file(file_path: Path) -> str:
-    """Extract text from various file formats"""
     suffix = file_path.suffix.lower()
     
     try:
         if suffix == ".pdf":
             reader = PdfReader(str(file_path))
-            return "\n\n".join([page.extract_text() for page in reader.pages if page.extract_text()])
+            text_parts = []
+            
+            for page in reader.pages:
+                txt = page.extract_text()
+                if txt and txt.strip():
+                    text_parts.append(txt)
+            
+            if not text_parts and OCR_AVAILABLE:
+                try:
+                    images = pdf2image.convert_from_path(str(file_path))
+                    for img in images:
+                        ocr_text = pytesseract.image_to_string(img)
+                        if ocr_text.strip():
+                            text_parts.append(ocr_text)
+                except Exception as e:
+                    text_parts.append(f"[OCR failed: {str(e)}]")
+            
+            return "\n\n".join(text_parts) if text_parts else "[No text extracted from PDF]"
         
         elif suffix == ".docx":
             doc = DocxDocument(str(file_path))
@@ -72,16 +100,20 @@ def extract_text_from_file(file_path: Path) -> str:
             df = pd.read_excel(file_path)
             return df.to_string()
         
+        elif suffix in [".jpg", ".jpeg", ".png", ".bmp", ".tiff"] and OCR_AVAILABLE:
+            img = Image.open(file_path)
+            return pytesseract.image_to_string(img)
+        
     except Exception as e:
         return f"[Error extracting {file_path.name}: {str(e)}]"
     
     return ""
 
 # ===== FILE MANAGEMENT =====
-def save_uploaded_files(uploaded_files, chat_name: str) -> List[str]:
-    """Save uploaded files and return their names"""
+def save_uploaded_files(uploaded_files, chat_name: str, username: str) -> List[str]:
     saved = []
-    chat_upload_dir = UPLOAD_DIR / chat_name
+    dirs = init_user_dirs(username)
+    chat_upload_dir = dirs['upload_dir'] / chat_name
     chat_upload_dir.mkdir(exist_ok=True)
     
     for file in uploaded_files:
@@ -93,11 +125,10 @@ def save_uploaded_files(uploaded_files, chat_name: str) -> List[str]:
     return saved
 
 # ===== FAISS INDEX =====
-def build_index_for_chat(chat_name: str, file_names: List[str]):
-    """Build or update FAISS index for a chat"""
-    chat_upload_dir = UPLOAD_DIR / chat_name
+def build_index_for_chat(chat_name: str, file_names: List[str], username: str):
+    dirs = init_user_dirs(username)
+    chat_upload_dir = dirs['upload_dir'] / chat_name
     
-    # Extract text from all files
     all_texts = []
     for file_name in file_names:
         file_path = chat_upload_dir / file_name
@@ -130,12 +161,12 @@ def build_index_for_chat(chat_name: str, file_names: List[str]):
     # Build FAISS index
     if chunks:
         vectorstore = FAISS.from_documents(chunks, EMBEDDINGS)
-        index_path = INDEX_DIR / chat_name
+        index_path = dirs['index_dir'] / chat_name
         vectorstore.save_local(str(index_path))
 
-def load_index(chat_name: str):
-    """Load FAISS index for a chat"""
-    index_path = INDEX_DIR / chat_name
+def load_index(chat_name: str, username: str):
+    dirs = get_user_dirs(username)
+    index_path = dirs['index_dir'] / chat_name
     if index_path.exists():
         try:
             return FAISS.load_local(str(index_path), EMBEDDINGS, allow_dangerous_deserialization=True)
@@ -144,12 +175,10 @@ def load_index(chat_name: str):
     return None
 
 # ===== GEMINI AI =====
-def get_ai_response(query: str, chat_name: str, chat_history: List[Dict]) -> str:
-    """Get AI response using context from FAISS and chat history"""
-    
+def get_ai_response(query: str, chat_name: str, chat_history: List[Dict], username: str) -> str:  
     # Retrieve context from FAISS
     context_parts = []
-    vectorstore = load_index(chat_name)
+    vectorstore = load_index(chat_name, username)
     
     if vectorstore:
         docs = vectorstore.similarity_search(query, k=4)
@@ -159,50 +188,43 @@ def get_ai_response(query: str, chat_name: str, chat_history: List[Dict]) -> str
                 context_parts.append(f"\n[Source: {doc.metadata.get('source', 'Unknown')}]")
                 context_parts.append(doc.page_content)
     
-    # Add recent chat history (last 6 messages for context)
-    if len(chat_history) > 1:
+
+    if len(chat_history) > 1: #last 6 messages
         context_parts.append("\n\n=== CONVERSATION HISTORY ===")
-        recent = chat_history[-6:-1]  # Exclude current message
+        recent = chat_history[-6:-1] 
         for msg in recent:
             role = msg['role'].upper()
             content = msg['content']
             context_parts.append(f"\n[{role}]: {content}")
     
-    # Build prompt
+    #prompt
     context = "\n".join(context_parts)
     
     prompt = f"""You are StudyMate, a helpful AI study assistant. Use the context below to answer the user's question accurately and clearly.
+            {context}   USER QUESTION: {query}
+            Provide a clear, well-structured answer. If the context doesn't contain the information, say so and provide a general answer based on your knowledge. Always be helpful and educational."""
 
-{context}
-
-USER QUESTION: {query}
-
-Provide a clear, well-structured answer. If the context doesn't contain the information, say so and provide a general answer based on your knowledge. Always be helpful and educational."""
-
-    # Call Gemini
+    #Gemini
     try:
-        model = genai.GenerativeModel('gemini-1.5-flash')
+        model = genai.GenerativeModel('gemini-2.5-flash-lite')
         response = model.generate_content(prompt)
         return response.text
     except Exception as e:
         return f"Sorry, I encountered an error: {str(e)}"
 
 # ===== QUIZ GENERATION =====
-def generate_quiz_for_chat(chat_name: str, chat_history: List[Dict], num_questions: int = 5) -> List[Dict]:
-    """Generate quiz questions based on chat context and files"""
+def generate_quiz_for_chat(chat_name: str, chat_history: List[Dict], username: str, num_questions: int = 5) -> List[Dict]:
     
-    # Get context from files
     context_parts = []
-    vectorstore = load_index(chat_name)
+    vectorstore = load_index(chat_name, username)
     
     if vectorstore:
-        # Get diverse content from index
         all_docs = vectorstore.similarity_search("", k=10)
-        for doc in all_docs[:5]:  # Use top 5 chunks
+        for doc in all_docs[:5]:  #top 5 chunks
             context_parts.append(doc.page_content)
     
-    # Add chat history
-    for msg in chat_history[-10:]:  # Last 10 messages
+    #last 10 messages
+    for msg in chat_history[-10:]:
         if msg['role'] == 'user':
             context_parts.append(f"Q: {msg['content']}")
         elif msg['role'] == 'assistant' and 'quiz' not in msg:
@@ -212,35 +234,34 @@ def generate_quiz_for_chat(chat_name: str, chat_history: List[Dict], num_questio
     
     prompt = f"""Based on the following study material and conversation, generate {num_questions} multiple-choice questions.
 
-MATERIAL:
-{context}
+            MATERIAL:
+            {context}
 
-Create {num_questions} questions in this EXACT JSON format:
-[
-  {{
-    "question": "Question text here?",
-    "choices": ["Option A", "Option B", "Option C", "Option D"],
-    "answer": "B"
-  }}
-]
+            Create {num_questions} questions in this EXACT JSON format:
+            [
+            {{
+                "question": "Question text here?",
+                "choices": ["Option A", "Option B", "Option C", "Option D"],
+                "answer": "B"
+            }}
+            ]
 
-Make questions educational and test understanding of key concepts. Ensure answer letters (A/B/C/D) match the choice positions."""
+            Make questions educational and test understanding of key concepts. Ensure answer letters (A/B/C/D) match the choice positions."""
 
     try:
-        model = genai.GenerativeModel('gemini-1.5-flash')
+        model = genai.GenerativeModel('gemini-2.5-flash-lite')
         response = model.generate_content(prompt)
         
         # Parse JSON from response
         response_text = response.text.strip()
         
-        # Extract JSON if wrapped in markdown
         if "```json" in response_text:
             response_text = response_text.split("```json")[1].split("```")[0].strip()
         elif "```" in response_text:
             response_text = response_text.split("```")[1].split("```")[0].strip()
         
         quiz = json.loads(response_text)
-        return quiz[:num_questions]  # Ensure we return requested number
+        return quiz[:num_questions] 
         
     except Exception as e:
         return [{
@@ -250,13 +271,16 @@ Make questions educational and test understanding of key concepts. Ensure answer
         }]
 
 # ===== CHAT MANAGEMENT =====
-def list_chats() -> List[str]:
-    """List all saved chats"""
-    return sorted([f.stem for f in CHAT_DIR.glob("*.json")])
+def list_chats(username: str) -> List[str]:
+    dirs = get_user_dirs(username)
+    chat_dir = dirs['chat_dir']
+    if chat_dir.exists():
+        return sorted([f.stem for f in chat_dir.glob("*.json")])
+    return []
 
-def save_chat(chat_name: str, messages: List[Dict], files: List[str]):
-    """Save chat to disk"""
-    chat_path = CHAT_DIR / f"{chat_name}.json"
+def save_chat(chat_name: str, messages: List[Dict], files: List[str], username: str):
+    dirs = init_user_dirs(username)
+    chat_path = dirs['chat_dir'] / f"{chat_name}.json"
     data = {
         "messages": messages,
         "files": files
@@ -264,34 +288,36 @@ def save_chat(chat_name: str, messages: List[Dict], files: List[str]):
     with open(chat_path, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2, ensure_ascii=False)
 
-def load_chat(chat_name: str) -> Dict:
-    """Load chat from disk"""
-    chat_path = CHAT_DIR / f"{chat_name}.json"
+def load_chat(chat_name: str, username: str) -> Dict:
+    dirs = get_user_dirs(username)
+    chat_path = dirs['chat_dir'] / f"{chat_name}.json"
     if chat_path.exists():
         with open(chat_path, "r", encoding="utf-8") as f:
             return json.load(f)
     return {"messages": [], "files": []}
 
-def delete_chat(chat_name: str):
-    """Delete a chat and its files"""
+def delete_chat(chat_name: str, username: str):
+    dirs = get_user_dirs(username)
+    
     # Delete chat file
-    chat_path = CHAT_DIR / f"{chat_name}.json"
+    chat_path = dirs['chat_dir'] / f"{chat_name}.json"
     if chat_path.exists():
         chat_path.unlink()
     
     # Delete uploaded files
-    upload_path = UPLOAD_DIR / chat_name
+    upload_path = dirs['upload_dir'] / chat_name
     if upload_path.exists():
         import shutil
         shutil.rmtree(upload_path)
     
     # Delete index
-    index_path = INDEX_DIR / chat_name
+    index_path = dirs['index_dir'] / chat_name
     if index_path.exists():
         import shutil
         shutil.rmtree(index_path)
-        
-def remove_file_from_chat(chat_name: str, file_name: str):
-    file_path = UPLOAD_DIR / chat_name / file_name
+
+def remove_file_from_chat(chat_name: str, file_name: str, username: str):
+    dirs = get_user_dirs(username)
+    file_path = dirs['upload_dir'] / chat_name / file_name
     if file_path.exists():
         file_path.unlink()
