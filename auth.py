@@ -17,18 +17,17 @@ def init_config():
                     'demo_user': {
                         'email': 'demo@example.com',
                         'name': 'Demo User',
-                        'password': Hasher.hash_list(['demo123'])[0]  # Password: demo123
-
+                        'password': Hasher.hash_list(['demo123'])[0]
                     }
                 }
             },
             'cookie': {
                 'expiry_days': 30,
-                'key': 'studymate_signature_key',  
+                'key': 'studymate_signature_key',
                 'name': 'studymate_cookie'
             },
             'preauthorized': {
-                'emails': []  # Emails that can register
+                'emails': []
             }
         }
         
@@ -58,8 +57,10 @@ def get_authenticator():
     return authenticator, config
 
 def register_new_user(authenticator, config):
+    """Fixed registration with proper error handling"""
     try:
-        success = authenticator.register_user(
+        # Try new API first
+        result = authenticator.register_user(
             location='main',
             fields={
                 'Form name': 'Register User',
@@ -67,75 +68,88 @@ def register_new_user(authenticator, config):
                 'Username': 'Username',
                 'Password': 'Password',
                 'Repeat password': 'Repeat password',
-                'Password hint': 'Password hint',
-                'Captcha': 'Captcha',
                 'Register': 'Register',
             }
         )
-    except TypeError:
-        try:
-            success = authenticator.register_user(location='main')
-        except Exception as e:
-            st.error(f"Registration failed (auth API mismatch): {e}")
-            return False
-
-    if success:
-        try:
+        
+        # Handle different return types
+        if result is True:
             save_config(config)
-        except Exception as e:
-            st.error(f"Failed to save config after registration: {e}")
+            st.success('User registered successfully! Please login.')
+            return True
+        elif result is False:
+            # Registration form shown but not submitted yet
             return False
-
-        st.success('User registered successfully! Please login.')
-        return True
-
-    # Failed
-    return False
-
+        else:
+            # None or other values - form shown
+            return False
+            
+    except TypeError:
+        # Try old API
+        try:
+            result = authenticator.register_user(location='main')
+            if result is True:
+                save_config(config)
+                st.success('User registered successfully! Please login.')
+                return True
+            return False
+        except Exception as e:
+            st.error(f"Registration failed: {str(e)}")
+            return False
+    except Exception as e:
+        st.error(f"Registration error: {str(e)}")
+        return False
 
 def reset_password(authenticator, config, username):
     try:
-        # Use location='main' for the form
-        if authenticator.reset_password(username, location='main'):
+        result = authenticator.reset_password(username, location='main')
+        if result is True:
             save_config(config)
             st.success('Password modified successfully!')
             return True
     except Exception as e:
-        st.error(f'Password reset failed: {e}')
+        st.error(f'Password reset failed: {str(e)}')
     return False
 
 def forgot_password(authenticator, config):
     try:
-        username, email, random_password = authenticator.forgot_password(location='main')
-        if username:
-            save_config(config)
-            st.success(f'New password: {random_password}')
-            st.info('Please use this password to login and change it immediately.')
-            return True
-        elif username == False:
-            st.error('Username not found')
+        result = authenticator.forgot_password(location='main')
+        if result and len(result) == 3:
+            username, email, random_password = result
+            if username:
+                save_config(config)
+                st.success(f'New password: {random_password}')
+                st.info('Please use this password to login and change it immediately.')
+                return True
+            elif username is False:
+                st.error('Username not found')
+        return False
     except Exception as e:
-        st.error(f'Error: {e}')
-    return False
+        st.error(f'Error: {str(e)}')
+        return False
 
 def forgot_username(authenticator, config):
     try:
-        username, email = authenticator.forgot_username(location='main')
-        if username:
-            st.success(f'Your username is: {username}')
-            return True
-        elif username == False:
-            st.error('Email not found')
+        result = authenticator.forgot_username(location='main')
+        if result and len(result) == 2:
+            username, email = result
+            if username:
+                st.success(f'Your username is: {username}')
+                return True
+            elif username is False:
+                st.error('Email not found')
+        return False
     except Exception as e:
-        st.error(f'Error: {e}')
-    return False
+        st.error(f'Error: {str(e)}')
+        return False
 
 def update_user_details(authenticator, config, username):
     try:
-        if authenticator.update_user_details(username, location='main'):
+        result = authenticator.update_user_details(username, location='main')
+        if result is True:
             save_config(config)
             st.success('Details updated successfully!')
             return True
     except Exception as e:
-        st.error(f'Update failed: {e}')
+        st.error(f'Update failed: {str(e)}')
     return False

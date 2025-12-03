@@ -11,3 +11,6 @@ transformers
 huggingface-hub
 google-generativeai
 openai
+openpyxl
+pandas
+wikipedia
