@@ -13,4 +13,4 @@ google-generativeai
 openai
 openpyxl
 pandas
-wikipedia
+streamlit_authenticator

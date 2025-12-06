@@ -1,8 +1,9 @@
 import os
 import json
 import hashlib
+import numpy as np
 from pathlib import Path
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Tuple
 from dotenv import load_dotenv
 from datetime import datetime, timedelta
 import shutil
@@ -29,11 +30,10 @@ except ImportError:
     OCR_AVAILABLE = False
 
 # LangChain & FAISS
-from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain.embeddings import HuggingFaceEmbeddings
-from langchain.vectorstores import FAISS
-from langchain.docstore.document import Document
-
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain_huggingface import HuggingFaceEmbeddings
+from langchain_community.vectorstores import FAISS
+from langchain_core.documents import Document
 import google.generativeai as genai
 
 load_dotenv()
@@ -49,16 +49,25 @@ if not GEMINI_KEY:
 
 genai.configure(api_key=GEMINI_KEY)
 
-# Embedding model
 EMBEDDINGS = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
 
 # ===== SEMANTIC CACHE =====
-class SemanticCache:
-    def __init__(self, cache_dir: Path = CACHE_DIR, expiry_hours: int = 24):
+class OptimizedSemanticCache:
+    
+    def __init__(self, cache_dir: Path = CACHE_DIR, expiry_hours: int = 24, similarity_threshold: float = 0.85):
         self.cache_dir = cache_dir
         self.cache_file = cache_dir / "semantic_cache.json"
         self.expiry_hours = expiry_hours
+        self.similarity_threshold = similarity_threshold
+        self.embeddings = EMBEDDINGS  
+
+        # In-memory caches for speed
         self.cache = self._load_cache()
+        self._embedding_cache = {}  
+        self._context_groups = {}    
+        
+        # Build context groups on init
+        self._rebuild_context_groups()
     
     def _load_cache(self) -> Dict:
         if self.cache_file.exists():
@@ -73,61 +82,155 @@ class SemanticCache:
         with open(self.cache_file, 'w', encoding='utf-8') as f:
             json.dump(self.cache, f, indent=2, ensure_ascii=False)
     
-    def _get_cache_key(self, query: str, context: str = "") -> str:
-        """Generate cache key from query and context"""
-        combined = f"{query.lower().strip()}|{context[:500]}"
-        return hashlib.md5(combined.encode()).hexdigest()
+    def _get_embedding(self, text: str) -> np.ndarray:
+        text_key = text.lower().strip()
+        
+        # Check memory cache first
+        if text_key in self._embedding_cache:
+            return self._embedding_cache[text_key]
+        
+        embedding = np.array(self.embeddings.embed_query(text_key))
+        
+        
+        if len(self._embedding_cache) < 1000:  # Limit to 1000 embeddings
+            self._embedding_cache[text_key] = embedding
+        
+        return embedding
+    
+    def _cosine_similarity(self, vec1: np.ndarray, vec2: np.ndarray) -> float:
+        return np.dot(vec1, vec2) / (np.linalg.norm(vec1) * np.linalg.norm(vec2))
     
     def _is_expired(self, timestamp: str) -> bool:
-        """Check if cache entry is expired"""
         try:
             cached_time = datetime.fromisoformat(timestamp)
             return datetime.now() - cached_time > timedelta(hours=self.expiry_hours)
         except:
             return True
     
-    def get(self, query: str, context: str = "") -> Optional[str]:
-        """Retrieve cached response if available and not expired"""
-        cache_key = self._get_cache_key(query, context)
+    def _create_context_hash(self, context: str) -> str:
+        context_key = context[:500].lower().strip()
+        return hashlib.md5(context_key.encode()).hexdigest()[:8]  # Use first 8 chars for speed
+    
+    def _rebuild_context_groups(self):
+        self._context_groups.clear()
         
-        if cache_key in self.cache:
-            entry = self.cache[cache_key]
-            if not self._is_expired(entry['timestamp']):
-                return entry['response']
-            else:
-                # Remove expired entry
-                del self.cache[cache_key]
-                self._save_cache()
+        for cache_key, entry in self.cache.items():
+            context_hash = entry.get('context_hash', 'default')
+            if context_hash not in self._context_groups:
+                self._context_groups[context_hash] = []
+            self._context_groups[context_hash].append((cache_key, entry))
+    
+    def get(self, query: str, context: str = "") -> Optional[Tuple[str, float]]:
+        query_embedding = self._get_embedding(query)
+        context_hash = self._create_context_hash(context)
         
-        return None
+        # Get relevant entries from context group only
+        relevant_entries = self._context_groups.get(context_hash, [])
+        
+        if not relevant_entries:
+            return None
+        
+        best_match = None
+        best_similarity = 0.0
+        expired_keys = []
+        
+        # Batch process all embeddings in the group
+        for cache_key, entry in relevant_entries:
+            if self._is_expired(entry['timestamp']):
+                expired_keys.append(cache_key)
+                continue
+            
+            # Get cached embedding
+            cached_embedding = entry.get('embedding')
+            if cached_embedding is None:
+                continue
+            
+            cached_embedding = np.array(cached_embedding)
+            
+            # Calculate similarity
+            similarity = self._cosine_similarity(query_embedding, cached_embedding)
+            
+            # Perfect match
+            if similarity > 0.99:
+                return (entry['response'], similarity)
+            
+            # Track best match
+            if similarity > best_similarity and similarity >= self.similarity_threshold:
+                best_similarity = similarity
+                best_match = entry['response']
+        
+        # Clean up expired entries
+        if expired_keys:
+            for key in expired_keys:
+                if key in self.cache:
+                    del self.cache[key]
+            self._save_cache()
+            self._rebuild_context_groups()
+        
+        return (best_match, best_similarity) if best_match else None
     
     def set(self, query: str, response: str, context: str = ""):
-        """Store response in cache"""
-        cache_key = self._get_cache_key(query, context)
+        # Generate unique key
+        cache_key = hashlib.md5(f"{query}{datetime.now().isoformat()}".encode()).hexdigest()
+        
+        # Get embedding
+        query_embedding = self._get_embedding(query)
+        context_hash = self._create_context_hash(context)
+        
+        # Store with list format for JSON serialization
         self.cache[cache_key] = {
             'query': query,
             'response': response,
+            'embedding': query_embedding.tolist(),  # Convert numpy to list
+            'context_hash': context_hash,
             'timestamp': datetime.now().isoformat()
         }
+        
+        # Update context groups
+        if context_hash not in self._context_groups:
+            self._context_groups[context_hash] = []
+        self._context_groups[context_hash].append((cache_key, self.cache[cache_key]))
+        
+        # Save to disk
         self._save_cache()
+        
+        if len(self.cache) > 500:  # Max 500 cached queries
+            self._trim_cache()
     
-    def clear_expired(self):
-        """Remove all expired entries"""
+    def _trim_cache(self):
+        # Sort by timestamp and keep newest 400
+        sorted_entries = sorted(
+            self.cache.items(),
+            key=lambda x: x[1]['timestamp'],
+            reverse=True
+        )
+        
+        self.cache = dict(sorted_entries[:400])
+        self._save_cache()
+        self._rebuild_context_groups()
+    
+    def clear_expired(self) -> int:
         expired_keys = [
             key for key, value in self.cache.items()
             if self._is_expired(value['timestamp'])
         ]
+        
         for key in expired_keys:
             del self.cache[key]
+        
         if expired_keys:
             self._save_cache()
+            self._rebuild_context_groups()
+            # Clear memory cache to free space
+            self._embedding_cache.clear()
+        
+        return len(expired_keys)
 
 # Global cache instance
-semantic_cache = SemanticCache()
+semantic_cache = OptimizedSemanticCache()
 
 # ===== WIKIPEDIA SEARCH =====
 def search_wikipedia(query: str, sentences: int = 3) -> str:
-    """Search Wikipedia for information"""
     if not WIKIPEDIA_AVAILABLE:
         return ""
     
@@ -170,7 +273,6 @@ def init_user_dirs(username: str):
     return dirs
 
 def cleanup_temp_data(username: str):
-    """Clean up temporary data for user"""
     dirs = get_user_dirs(username)
     
     # Clean temp uploads
@@ -184,7 +286,6 @@ def cleanup_temp_data(username: str):
         shutil.rmtree(temp_index)
 
 def move_temp_to_chat(chat_name: str, username: str):
-    """Move temp data to named chat"""
     dirs = get_user_dirs(username)
     
     # Move uploads
@@ -328,7 +429,7 @@ def load_index(chat_name: str, username: str):
             return None
     return None
 
-# ===== GEMINI AI WITH CACHING =====
+# ===== GEMINI AI WITH OPTIMIZED SEMANTIC CACHING =====
 def get_ai_response(query: str, chat_name: str, chat_history: List[Dict], username: str) -> str:  
     # Retrieve context from FAISS
     context_parts = []
@@ -353,10 +454,11 @@ def get_ai_response(query: str, chat_name: str, chat_history: List[Dict], userna
     
     context = "\n".join(context_parts)
     
-    # Check cache first
-    cached_response = semantic_cache.get(query, context)
-    if cached_response:
-        return f"{cached_response}\n\n*[Response from cache]*"
+    # Check semantic cache first (now truly semantic!)
+    cache_result = semantic_cache.get(query, context)
+    if cache_result:
+        response, similarity = cache_result
+        return f"{response}\n\n*[Cached response - {similarity:.1%} match]*"
     
     # Search Wikipedia if no files context
     wiki_info = ""
@@ -369,11 +471,11 @@ def get_ai_response(query: str, chat_name: str, chat_history: List[Dict], userna
     # Build prompt
     prompt = f"""You are StudyMate, a helpful AI study assistant. Use the context below to answer the user's question accurately and clearly.
 
-{context}
+            {context}
 
-USER QUESTION: {query}
+            USER QUESTION: {query}
 
-Provide a clear, well-structured answer. If the context doesn't contain the information, say so and provide a general answer based on your knowledge. Always be helpful and educational."""
+            Provide a clear, well-structured answer. If the context doesn't contain the information, say so and provide a general answer based on your knowledge. Always be helpful and educational."""
 
     # Call Gemini
     try:
@@ -381,7 +483,7 @@ Provide a clear, well-structured answer. If the context doesn't contain the info
         response = model.generate_content(prompt)
         result = response.text
         
-        # Cache the response
+        # Cache the response with semantic matching
         semantic_cache.set(query, result, context)
         
         return result
@@ -408,19 +510,19 @@ def generate_quiz_for_chat(chat_name: str, chat_history: List[Dict], username: s
     
     prompt = f"""Based on the following study material and conversation, generate {num_questions} multiple-choice questions.
 
-MATERIAL:
-{context}
+            MATERIAL:
+            {context}
 
-Create {num_questions} questions in this EXACT JSON format:
-[
-{{
-    "question": "Question text here?",
-    "choices": ["Option A", "Option B", "Option C", "Option D"],
-    "answer": "B"
-}}
-]
+            Create {num_questions} questions in this EXACT JSON format:
+            [
+            {{
+                "question": "Question text here?",
+                "choices": ["Option A", "Option B", "Option C", "Option D"],
+                "answer": "B"
+            }}
+            ]
 
-Make questions educational and test understanding of key concepts. Ensure answer letters (A/B/C/D) match the choice positions."""
+            Make questions educational and test understanding of key concepts. Ensure answer letters (A/B/C/D) match the choice positions."""
 
     try:
         model = genai.GenerativeModel('gemini-2.5-flash-lite')
@@ -452,7 +554,7 @@ def list_chats(username: str) -> List[str]:
     return []
 
 def save_chat(chat_name: str, messages: List[Dict], files: List[str], username: str):
-    # Move temp data to this chat if needed
+    # Move temp data chat
     move_temp_to_chat(chat_name, username)
     
     dirs = init_user_dirs(username)

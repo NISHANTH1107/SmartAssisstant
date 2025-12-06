@@ -11,7 +11,6 @@ class GracefulErrorHandler:
         self.error_occurred = False
     
     def handle_error(self, error_msg: str):
-        """Display graceful error message"""
         if not self.error_occurred:
             st.error(f"⚠️ {error_msg}")
             self.error_occurred = True
@@ -65,7 +64,6 @@ if st.session_state.get('authentication_status') is True:
         
         # New Chat Button
         if st.button("➕ New Chat", use_container_width=True, type="primary"):
-            # Clean up temp data before starting new chat
             cleanup_temp_data(username)
             st.session_state.current_chat = None
             st.session_state.messages = []
@@ -74,25 +72,34 @@ if st.session_state.get('authentication_status') is True:
         
         st.markdown("---")
         st.subheader("Your Chats")
-        
-        # List existing chats
+
         chats = list_chats(username)
+        current = st.session_state.get("current_chat")
+
         if chats:
             for chat_name in chats:
+                is_selected = (chat_name == current)
+
                 col1, col2 = st.columns([4, 1])
+
                 with col1:
-                    if st.button(f"💬 {chat_name}", key=f"load_{chat_name}", use_container_width=True):
-                        # Clean temp before loading
+                    if st.button(
+                        f"💬 {chat_name}",
+                        key=f"load_{chat_name}",
+                        use_container_width=True,
+                        type=("primary" if is_selected else "secondary")
+                    ):
                         cleanup_temp_data(username)
                         st.session_state.current_chat = chat_name
                         data = load_chat(chat_name, username)
                         st.session_state.messages = data['messages']
                         st.session_state.chat_files = data['files']
                         st.rerun()
+
                 with col2:
                     if st.button("🗑️", key=f"del_{chat_name}"):
                         delete_chat(chat_name, username)
-                        if st.session_state.current_chat == chat_name:
+                        if current == chat_name:
                             cleanup_temp_data(username)
                             st.session_state.current_chat = None
                             st.session_state.messages = []
@@ -100,6 +107,7 @@ if st.session_state.get('authentication_status') is True:
                         st.rerun()
         else:
             st.info("No saved chats yet")
+
         
         st.markdown("---")
         st.caption("📚 Upload files and ask questions!")

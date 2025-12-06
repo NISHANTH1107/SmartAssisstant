@@ -57,47 +57,38 @@ def get_authenticator():
     return authenticator, config
 
 def register_new_user(authenticator, config):
-    """Fixed registration with proper error handling"""
     try:
-        # Try new API first
-        result = authenticator.register_user(
-            location='main',
-            fields={
-                'Form name': 'Register User',
-                'Email': 'Email',
-                'Username': 'Username',
-                'Password': 'Password',
-                'Repeat password': 'Repeat password',
-                'Register': 'Register',
-            }
-        )
+        try:
+            result = authenticator.register_user(location='main')
+        except TypeError:
+            try:
+                result = authenticator.register_user(
+                    location='main',
+                    fields={'Form name': 'Register user'}
+                )
+            except TypeError:
+                # Method 3: Try bare minimum (oldest versions)
+                result = authenticator.register_user('main')
         
         # Handle different return types
         if result is True:
             save_config(config)
-            st.success('User registered successfully! Please login.')
+            st.success('✅ User registered successfully! Please login with your credentials.')
             return True
-        elif result is False:
-            # Registration form shown but not submitted yet
-            return False
-        else:
-            # None or other values - form shown
-            return False
-            
-    except TypeError:
-        # Try old API
-        try:
-            result = authenticator.register_user(location='main')
-            if result is True:
+        elif isinstance(result, tuple):
+            if len(result) >= 1 and result[0]:  # Check if first element (email/username) exists
                 save_config(config)
-                st.success('User registered successfully! Please login.')
+                st.success('✅ User registered successfully! Please login with your credentials.')
                 return True
-            return False
-        except Exception as e:
-            st.error(f"Registration failed: {str(e)}")
-            return False
+        
+        return False
+        
     except Exception as e:
-        st.error(f"Registration error: {str(e)}")
+        error_msg = str(e).lower()
+        if "already" in error_msg or "taken" in error_msg or "exists" in error_msg:
+            st.error('❌ Username or email already exists')
+        else:
+            st.error(f'❌ Registration error: Please try again or contact support')
         return False
 
 def reset_password(authenticator, config, username):
