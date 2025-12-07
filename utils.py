@@ -20,7 +20,7 @@ try:
     WIKIPEDIA_AVAILABLE = True
 except ImportError:
     WIKIPEDIA_AVAILABLE = False
-
+#try OCR
 try:
     import pytesseract
     from PIL import Image
@@ -51,7 +51,7 @@ genai.configure(api_key=GEMINI_KEY)
 
 EMBEDDINGS = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
 
-# ===== SEMANTIC CACHE =====
+#Semantic Cache
 class OptimizedSemanticCache:
     
     def __init__(self, cache_dir: Path = CACHE_DIR, expiry_hours: int = 24, similarity_threshold: float = 0.85):
@@ -229,7 +229,77 @@ class OptimizedSemanticCache:
 # Global cache instance
 semantic_cache = OptimizedSemanticCache()
 
-# ===== WIKIPEDIA SEARCH =====
+#file summary cache
+class FileSummaryCache:
+    def __init__(self, cache_dir: Path = CACHE_DIR):
+        self.cache_dir = cache_dir
+        self.cache_file = cache_dir / "file_summaries.json"
+        self.cache = self._load_cache()
+    
+    def _load_cache(self) -> Dict:
+        if self.cache_file.exists():
+            try:
+                with open(self.cache_file, 'r', encoding='utf-8') as f:
+                    return json.load(f)
+            except:
+                return {}
+        return {}
+    
+    def _save_cache(self):
+        with open(self.cache_file, 'w', encoding='utf-8') as f:
+            json.dump(self.cache, f, indent=2, ensure_ascii=False)
+    
+    def _get_file_hash(self, file_path: Path) -> str:
+        try:
+            mtime = file_path.stat().st_mtime
+            return hashlib.md5(f"{file_path}{mtime}".encode()).hexdigest()
+        except:
+            return hashlib.md5(str(file_path).encode()).hexdigest()
+    
+    def get(self, file_path: Path) -> Optional[str]:
+        file_hash = self._get_file_hash(file_path)
+        cache_key = str(file_path)
+        
+        if cache_key in self.cache:
+            entry = self.cache[cache_key]
+            if entry.get('hash') == file_hash:
+                return entry.get('summary')
+        
+        return None
+    
+    def set(self, file_path: Path, summary: str):
+        file_hash = self._get_file_hash(file_path)
+        self.cache[str(file_path)] = {
+            'summary': summary,
+            'hash': file_hash,
+            'timestamp': datetime.now().isoformat()
+        }
+        self._save_cache()
+    
+    def clear_old(self, days: int = 7):
+        cutoff = datetime.now() - timedelta(days=days)
+        keys_to_remove = []
+        
+        for key, entry in self.cache.items():
+            try:
+                timestamp = datetime.fromisoformat(entry['timestamp'])
+                if timestamp < cutoff:
+                    keys_to_remove.append(key)
+            except:
+                keys_to_remove.append(key)
+        
+        for key in keys_to_remove:
+            del self.cache[key]
+        
+        if keys_to_remove:
+            self._save_cache()
+        
+        return len(keys_to_remove)
+
+#global summary cache
+summary_cache = FileSummaryCache()
+
+#wikipedia
 def search_wikipedia(query: str, sentences: int = 3) -> str:
     if not WIKIPEDIA_AVAILABLE:
         return ""
@@ -257,7 +327,7 @@ def search_wikipedia(query: str, sentences: int = 3) -> str:
     except Exception:
         return ""
 
-# ===== USER-SPECIFIC DIRECTORIES =====
+#user-based
 def get_user_dirs(username: str):
     user_dir = DATA_DIR / "users" / username
     return {
@@ -309,7 +379,7 @@ def move_temp_to_chat(chat_name: str, username: str):
             shutil.rmtree(chat_index)
         temp_index.rename(chat_index)
 
-# ===== FILE EXTRACTION =====
+#file extract
 def extract_text_from_file(file_path: Path) -> str:
     suffix = file_path.suffix.lower()
     
@@ -364,7 +434,61 @@ def extract_text_from_file(file_path: Path) -> str:
     
     return ""
 
-# ===== FILE MANAGEMENT =====
+#file summary
+def summarize_file(file_name: str, chat_name: str, username: str) -> str:
+    dirs = get_user_dirs(username)
+    file_path = dirs['upload_dir'] / chat_name / file_name
+    
+    if not file_path.exists():
+        return f"Error: File '{file_name}' not found."
+    
+    # Check cache first
+    cached_summary = summary_cache.get(file_path)
+    if cached_summary:
+        return cached_summary
+    
+    # Extract text from file
+    try:
+        text_content = extract_text_from_file(file_path)
+        
+        if not text_content or text_content.strip() == "":
+            return f"Error: No content could be extracted from '{file_name}'."
+        
+        # Truncate if too long (Gemini has token limits)
+        max_chars = 30000
+        if len(text_content) > max_chars:
+            text_content = text_content[:max_chars] + "\n\n[Content truncated for length...]"
+        
+        # Create summarization prompt
+        prompt = f"""You are an expert study assistant. Please provide a comprehensive summary of the following document.
+
+                Document: {file_name}
+
+                Content:
+                {text_content}
+
+                Please provide:
+                1. A brief overview (2-3 sentences)
+                2. Key points and main topics covered
+                3. Important concepts or definitions
+                4. Any notable data, figures, or conclusions
+
+                Make the summary clear, well-structured, and educational."""
+
+        # Call Gemini for summarization
+        model = genai.GenerativeModel('gemini-2.5-flash-lite')
+        response = model.generate_content(prompt)
+        summary = response.text
+        
+        # Cache the summary
+        summary_cache.set(file_path, summary)
+        
+        return summary
+        
+    except Exception as e:
+        return f"Error generating summary for '{file_name}': {str(e)}"
+
+#file management
 def save_uploaded_files(uploaded_files, chat_name: str, username: str) -> List[str]:
     saved = []
     dirs = init_user_dirs(username)
@@ -379,7 +503,7 @@ def save_uploaded_files(uploaded_files, chat_name: str, username: str) -> List[s
     
     return saved
 
-# ===== FAISS INDEX =====
+#FAISS
 def build_index_for_chat(chat_name: str, file_names: List[str], username: str):
     dirs = init_user_dirs(username)
     chat_upload_dir = dirs['upload_dir'] / chat_name
@@ -429,7 +553,7 @@ def load_index(chat_name: str, username: str):
             return None
     return None
 
-# ===== GEMINI AI WITH OPTIMIZED SEMANTIC CACHING =====
+#generate response
 def get_ai_response(query: str, chat_name: str, chat_history: List[Dict], username: str) -> str:  
     # Retrieve context from FAISS
     context_parts = []
@@ -490,7 +614,7 @@ def get_ai_response(query: str, chat_name: str, chat_history: List[Dict], userna
     except Exception as e:
         return f"I encountered an error while processing your request. Please try again."
 
-# ===== QUIZ GENERATION =====
+#quiz
 def generate_quiz_for_chat(chat_name: str, chat_history: List[Dict], username: str, num_questions: int = 5) -> List[Dict]:
     context_parts = []
     vectorstore = load_index(chat_name, username)
@@ -545,7 +669,7 @@ def generate_quiz_for_chat(chat_name: str, chat_history: List[Dict], username: s
             "answer": "A"
         }]
 
-# ===== CHAT MANAGEMENT =====
+#save chats
 def list_chats(username: str) -> List[str]:
     dirs = get_user_dirs(username)
     chat_dir = dirs['chat_dir']

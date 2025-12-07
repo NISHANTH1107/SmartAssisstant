@@ -5,7 +5,7 @@ from auth import *
 import sys
 from io import StringIO
 
-# Custom error handler to suppress verbose Streamlit errors
+#error handling
 class GracefulErrorHandler:
     def __init__(self):
         self.error_occurred = False
@@ -48,7 +48,7 @@ if st.session_state.get('authentication_status') is True:
         # Clean up any temp data from previous sessions
         cleanup_temp_data(username)
 
-    # ===== SIDEBAR =====
+    #Sidebar
     with st.sidebar:
         st.title(f"🎓 Welcome, {name}!")
         
@@ -115,9 +115,10 @@ if st.session_state.get('authentication_status') is True:
         # Clear cache button
         if st.button("🔄 Clear Response Cache", use_container_width=True):
             semantic_cache.clear_expired()
+            summary_cache.clear_old(days=7)
             st.success("Cache cleared!")
 
-    # ===== MAIN CHAT AREA =====
+    #Mainchat
     st.title("💬 StudyMate - Your AI Study Assistant")
     
     # Info banner
@@ -195,16 +196,47 @@ if st.session_state.get('authentication_status') is True:
                 except Exception as e:
                     st.error(f"⚠️ Error processing files. Please try again.")
 
-    # Display uploaded files for current chat
+    # Display uploaded files for current chat with SUMMARIZE button
     if st.session_state.chat_files:
         with st.expander(f"📚 Files in this chat ({len(st.session_state.chat_files)})", expanded=False):
             files_to_remove = []
+            
             for idx, file in enumerate(st.session_state.chat_files):
-                col1, col2 = st.columns([5, 1])
+                col1, col2, col3 = st.columns([4, 1, 1])
+                
                 with col1:
                     st.text(f"• {file}")
+                
                 with col2:
-                    if st.button("x", key=f"remove_{idx}_{file}"):
+                    if st.button("📝", key=f"summarize_{idx}_{file}", help="Summarize this file"):
+                        with st.spinner(f"Summarizing {file}..."):
+                            try:
+                                summary = summarize_file(
+                                    file,
+                                    st.session_state.current_chat or "temp",
+                                    username
+                                )
+                                # Add summary to chat
+                                summary_msg = {
+                                    "role": "assistant",
+                                    "content": f"📄 **Summary of '{file}':**\n\n{summary}"
+                                }
+                                st.session_state.messages.append(summary_msg)
+                                
+                                # Save if chat exists
+                                if st.session_state.current_chat:
+                                    save_chat(
+                                        st.session_state.current_chat,
+                                        st.session_state.messages,
+                                        st.session_state.chat_files,
+                                        username
+                                    )
+                                st.rerun()
+                            except Exception as e:
+                                st.error(f"⚠️ Error summarizing file: {str(e)}")
+                
+                with col3:
+                    if st.button("🗑️", key=f"remove_{idx}_{file}", help="Remove this file"):
                         files_to_remove.append(file)
             
             if files_to_remove:
@@ -332,9 +364,9 @@ if st.session_state.get('authentication_status') is True:
                 except Exception as e:
                     st.error("⚠️ Unable to generate quiz. Please try again.")
 
-# Not authenticated - LOGIN PAGE
+# Not authenticated
 else:
-    # Suppress registration success messages when page loads
+    # Suppress registration success messages
     if 'registration_attempted' not in st.session_state:
         st.session_state.registration_attempted = False
     

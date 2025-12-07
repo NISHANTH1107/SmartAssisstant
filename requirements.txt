@@ -4,6 +4,8 @@ wikipedia
 PyPDF2
 python-docx
 python-pptx
+pdf2image
+pytesseract
 langchain
 sentence-transformers
 faiss-cpu
