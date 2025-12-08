@@ -119,7 +119,7 @@ if st.session_state.get('authentication_status') is True:
             st.success("Cache cleared!")
 
     #Mainchat
-    st.title("💬 StudyMate - Your AI Study Assistant")
+    st.title("🤖 StudyMate - Your AI Study Assistant")
     
     # Info banner
     if WIKIPEDIA_AVAILABLE:
@@ -150,11 +150,11 @@ if st.session_state.get('authentication_status') is True:
                         st.error("⚠️ Please enter a chat name")
 
     # File Upload Area
-    with st.expander("📎 Upload Files (PDF, DOCX, PPTX, TXT, XLS, XLSX, Images)", expanded=not st.session_state.messages):
+    with st.expander("📎 Upload Files (PDF, DOCX, PPTX, TXT, XLS, XLSX)", expanded=not st.session_state.messages):
         uploaded_files = st.file_uploader(
-            "Drop your study materials here (includes OCR for scanned documents)",
+            "Drop your study materials here",
             accept_multiple_files=True,
-            type=["pdf", "docx", "pptx", "txt", "xls", "xlsx", "jpg", "jpeg", "png", "bmp", "tiff"],
+            type=["pdf", "docx", "pptx", "txt", "xls", "xlsx"],
             key="file_uploader"
         )
         
@@ -282,10 +282,21 @@ if st.session_state.get('authentication_status') is True:
             if message["role"] == "assistant" and "quiz" in message:
                 with st.expander("📝 Quiz Questions", expanded=True):
                     for i, q in enumerate(message["quiz"], 1):
-                        st.markdown(f"**Q{i}. {q['question']}**")
-                        for j, choice in enumerate(q['choices']):
-                            st.markdown(f"&nbsp;&nbsp;&nbsp;{chr(65+j)}. {choice}")
-                        st.success(f"**Answer: {q['answer']}**")
+                        # Check question type
+                        q_type = q.get('type', 'mcq')
+                        marks = q.get('marks', 1)
+                        
+                        if q_type == 'mcq':
+                            st.markdown(f"**Q{i}. {q['question']}** _(1 mark)_")
+                            for j, choice in enumerate(q['choices']):
+                                st.markdown(f"&nbsp;&nbsp;&nbsp;{chr(65+j)}. {choice}")
+                            st.success(f"**Answer: {q['answer']}**")
+                        
+                        elif q_type == 'short':
+                            st.markdown(f"**Q{i}. {q['question']}** _(2 marks)_")
+                            with st.container():
+                                st.info(f"**Answer:**\n\n{q['answer']}")
+                        
                         if i < len(message["quiz"]):
                             st.markdown("---")
 

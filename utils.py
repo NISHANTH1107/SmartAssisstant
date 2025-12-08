@@ -615,7 +615,7 @@ def get_ai_response(query: str, chat_name: str, chat_history: List[Dict], userna
         return f"I encountered an error while processing your request. Please try again."
 
 #quiz
-def generate_quiz_for_chat(chat_name: str, chat_history: List[Dict], username: str, num_questions: int = 5) -> List[Dict]:
+def generate_quiz_for_chat(chat_name: str, chat_history: List[Dict], username: str, num_questions: int = 10) -> List[Dict]:
     context_parts = []
     vectorstore = load_index(chat_name, username)
     
@@ -632,21 +632,41 @@ def generate_quiz_for_chat(chat_name: str, chat_history: List[Dict], username: s
     
     context = "\n\n".join(context_parts)
     
-    prompt = f"""Based on the following study material and conversation, generate {num_questions} multiple-choice questions.
+    prompt = f"""Based on the following study material and conversation, generate a quiz with {num_questions} questions total.
 
             MATERIAL:
             {context}
 
-            Create {num_questions} questions in this EXACT JSON format:
+            Create a mix of questions:
+            - 7-8 Multiple Choice Questions (MCQs)
+            - 2-3 Short Answer Questions (2 marks each)
+
+            Use this EXACT JSON format:
             [
             {{
+                "type": "mcq",
                 "question": "Question text here?",
                 "choices": ["Option A", "Option B", "Option C", "Option D"],
-                "answer": "B"
+                "answer": "B",
+                "marks": 1
+            }},
+            {{
+                "type": "short",
+                "question": "Define/Explain [concept]?",
+                "answer": "A brief 4-5 line answer explaining the concept clearly and concisely.",
+                "marks": 2
             }}
             ]
 
-            Make questions educational and test understanding of key concepts. Ensure answer letters (A/B/C/D) match the choice positions."""
+            Guidelines:
+            - MCQs should test understanding, application, and recall
+            - Short answer questions should ask to "Define", "Explain", "Describe", or "State" key concepts
+            - Short answers should be a brief of 4-5 liners at maximum (70-100 words)
+            - Focus on important concepts from the material
+            - Ensure MCQ answer letters (A/B/C/D) match choice positions
+            - Total questions: {num_questions}
+            - Maintain a 7:3 or 8:2 ratio (MCQs:Short answers)
+            - Interleave question types for variety"""
 
     try:
         model = genai.GenerativeModel('gemini-2.5-flash-lite')
@@ -660,13 +680,26 @@ def generate_quiz_for_chat(chat_name: str, chat_history: List[Dict], username: s
             response_text = response_text.split("```")[1].split("```")[0].strip()
         
         quiz = json.loads(response_text)
+        
+        # Validate and ensure we have the right mix
+        mcq_count = sum(1 for q in quiz if q.get('type') == 'mcq')
+        short_count = sum(1 for q in quiz if q.get('type') == 'short')
+        
+        # If mix is wrong, filter and adjust
+        if mcq_count < 6 or short_count < 1:
+            mcqs = [q for q in quiz if q.get('type') == 'mcq'][:mcq_count]
+            shorts = [q for q in quiz if q.get('type') == 'short'][:short_count]
+            quiz = mcqs + shorts
+        
         return quiz[:num_questions]
         
-    except Exception:
+    except Exception as e:
         return [{
+            "type": "mcq",
             "question": "Unable to generate quiz at this time. Please try again.",
             "choices": ["Try again later"],
-            "answer": "A"
+            "answer": "A",
+            "marks": 1
         }]
 
 #save chats
