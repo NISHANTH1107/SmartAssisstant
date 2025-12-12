@@ -110,6 +110,8 @@ Do not commit your `.env` file or API keys to version control.
 3. When you ask a question, the app performs a similarity search to retrieve relevant chunks and includes recent chat history when building the LLM prompt.
 4. The LLM generates the answer, and you can optionally generate a short quiz from the same context.
 
+**Demo video:** [Watch the demonstration video](https://drive.google.com/file/d/1CmvM-Qu--0-OVfFT-FnVczgfqARUfgHC/view?usp=sharing)
+
 ---
 
 ## Semantic Caching (Smart Response Reuse)
