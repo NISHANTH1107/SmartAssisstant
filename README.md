@@ -28,6 +28,23 @@ Key goals:
 
 See `requirements.txt` for the Python packages used by the project.
 
+## Tech Stack
+
+| Layer | Tools / Technologies |
+| --- | --- |
+| Frontend | Streamlit (UI Rendering), Python |
+| Backend / App Logic | Python, Streamlit Server, Custom Utility Modules (`utils.py`) |
+| LLM Provider | Google Generative AI (`google-generativeai`) |
+| RAG Pipeline | LangChain (document loaders, text splitting, regex-based chunking, retrieval pipeline) |
+| Embeddings | HuggingFace Sentence Transformers (`sentence-transformers`) |
+| Vector Index (Retrieval) | FAISS (Local, per-chat vector store) |
+| Caching | Semantic Cache (smart response reuse), Summary Cache (document-level caching) |
+| File Processing | PyPDF2, python-docx, python-pptx, pandas, xlrd/openpyxl |
+| Storage | Local file storage under `data/` (`uploads/`, `indexes/`, `chats/`, `cache/`) |
+| Environment Management | `python-dotenv` |
+| Styling / UI | Streamlit Components |
+| Language | Python 3.10+ |
+
 ---
 
 ## Quick start (Windows - cmd.exe)
