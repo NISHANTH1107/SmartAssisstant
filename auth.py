@@ -1,146 +1,112 @@
 import streamlit as st
-import yaml
-from yaml.loader import SafeLoader
 import streamlit_authenticator as stauth
 from streamlit_authenticator.utilities.hasher import Hasher
-from pathlib import Path
+from datetime import datetime, timezone
+from db import users_col
 
-# Configuration file path
-CONFIG_FILE = Path("./config.yaml")
+def build_config_from_db():
+    users = users_col.find({})
+    credentials = {"usernames": {}}
 
-def init_config():
-    if not CONFIG_FILE.exists():
-        # Create default config with hashed passwords
-        config = {
-            'credentials': {
-                'usernames': {
-                    'demo_user': {
-                        'email': 'demo@example.com',
-                        'name': 'Demo User',
-                        'password': Hasher.hash_list(['demo123'])[0]
-                    }
-                }
-            },
-            'cookie': {
-                'expiry_days': 30,
-                'key': 'studymate_signature_key',
-                'name': 'studymate_cookie'
-            },
-            'preauthorized': {
-                'emails': []
-            }
+    for u in users:
+        credentials["usernames"][u["username"]] = {
+            "email": u["email"],
+            "name": u["name"],
+            "password": u["password"]
         }
-        
-        with open(CONFIG_FILE, 'w') as file:
-            yaml.dump(config, file, default_flow_style=False)
-    
-    # Load config
-    with open(CONFIG_FILE) as file:
-        config = yaml.load(file, Loader=SafeLoader)
-    
+
+    config = {
+        "credentials": credentials,
+        "cookie": {
+            "expiry_days": 30,
+            "key": "studymate_signature_key",
+            "name": "studymate_cookie"
+        },
+        "preauthorized": {
+            "emails": []
+        }
+    }
     return config
 
-def save_config(config):
-    with open(CONFIG_FILE, 'w') as file:
-        yaml.dump(config, file, default_flow_style=False)
-
 def get_authenticator():
-    config = init_config()
-    
+    config = build_config_from_db()
+
     authenticator = stauth.Authenticate(
-        config['credentials'],
-        config['cookie']['name'],
-        config['cookie']['key'],
-        config['cookie']['expiry_days']
+        config["credentials"],
+        config["cookie"]["name"],
+        config["cookie"]["key"],
+        config["cookie"]["expiry_days"]
     )
-    
     return authenticator, config
 
 def register_new_user(authenticator, config):
-    try:
-        try:
-            result = authenticator.register_user(location='main')
-        except TypeError:
-            try:
-                result = authenticator.register_user(
-                    location='main',
-                    fields={'Form name': 'Register user'}
-                )
-            except TypeError:
-                # Method 3: Try bare minimum (oldest versions)
-                result = authenticator.register_user('main')
-        
-        # Handle different return types
-        if result is True:
-            save_config(config)
-            st.success('✅ User registered successfully! Please login with your credentials.')
-            return True
-        elif isinstance(result, tuple):
-            if len(result) >= 1 and result[0]:  # Check if first element (email/username) exists
-                save_config(config)
-                st.success('✅ User registered successfully! Please login with your credentials.')
-                return True
-        
-        return False
-        
-    except Exception as e:
-        error_msg = str(e).lower()
-        if "already" in error_msg or "taken" in error_msg or "exists" in error_msg:
-            st.error('❌ Username or email already exists')
-        else:
-            st.error(f'❌ Registration error: Please try again or contact support')
+    result = authenticator.register_user(location="main")
+
+    if not result:
         return False
 
+    # streamlit_authenticator versions vary:
+    # result can be (username, email, name) OR email OR username
+    credentials = config["credentials"]["usernames"]
+
+    # Safely detect the newly added user
+    new_username = None
+    for uname in credentials:
+        if users_col.find_one({"username": uname}) is None:
+            new_username = uname
+            break
+
+    if not new_username:
+        st.error("Registration failed: unable to detect new user")
+        return False
+
+    user = credentials[new_username]
+
+    users_col.insert_one({
+        "username": new_username,
+        "name": user.get("name", new_username),
+        "email": user.get("email", ""),
+        "password": user["password"],
+        "created_at": datetime.now(timezone.utc),
+        "updated_at": datetime.now(timezone.utc)
+    })
+
+    st.success("✅ User registered successfully! Please login.")
+    return True
+
+
 def reset_password(authenticator, config, username):
-    try:
-        result = authenticator.reset_password(username, location='main')
-        if result is True:
-            save_config(config)
-            st.success('Password modified successfully!')
-            return True
-    except Exception as e:
-        st.error(f'Password reset failed: {str(e)}')
+    if authenticator.reset_password(username, location="main"):
+        hashed = config["credentials"]["usernames"][username]["password"]
+        users_col.update_one(
+            {"username": username},
+            {"$set": {"password": hashed, "updated_at": datetime.utcnow()}}
+        )
+        st.success("Password updated successfully!")
+        return True
     return False
 
 def forgot_password(authenticator, config):
-    try:
-        result = authenticator.forgot_password(location='main')
-        if result and len(result) == 3:
-            username, email, random_password = result
-            if username:
-                save_config(config)
-                st.success(f'New password: {random_password}')
-                st.info('Please use this password to login and change it immediately.')
-                return True
-            elif username is False:
-                st.error('Username not found')
-        return False
-    except Exception as e:
-        st.error(f'Error: {str(e)}')
-        return False
+    result = authenticator.forgot_password(location="main")
+    if result and len(result) == 3:
+        username, email, new_password = result
+        hashed = Hasher.hash_list([new_password])[0]
+
+        users_col.update_one(
+            {"username": username},
+            {"$set": {"password": hashed, "updated_at": datetime.utcnow()}}
+        )
+
+        st.success(f"New password: {new_password}")
+        st.info("Please login and change it immediately.")
+        return True
+    return False
 
 def forgot_username(authenticator, config):
-    try:
-        result = authenticator.forgot_username(location='main')
-        if result and len(result) == 2:
-            username, email = result
-            if username:
-                st.success(f'Your username is: {username}')
-                return True
-            elif username is False:
-                st.error('Email not found')
-        return False
-    except Exception as e:
-        st.error(f'Error: {str(e)}')
-        return False
-
-def update_user_details(authenticator, config, username):
-    try:
-        result = authenticator.update_user_details(username, location='main')
-        if result is True:
-            save_config(config)
-            st.success('Details updated successfully!')
+    result = authenticator.forgot_username(location="main")
+    if result and len(result) == 2:
+        username, _ = result
+        if username:
+            st.success(f"Your username is: {username}")
             return True
-    except Exception as e:
-        st.error(f'Update failed: {str(e)}')
     return False

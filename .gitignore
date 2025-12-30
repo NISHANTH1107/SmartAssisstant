@@ -6,3 +6,5 @@ data/
 config.yaml
 venv
 tries
+test.py
+

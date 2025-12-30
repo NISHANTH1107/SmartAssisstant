@@ -6,16 +6,16 @@ import sys
 from io import StringIO
 
 #error handling
-class GracefulErrorHandler:
-    def __init__(self):
-        self.error_occurred = False
+# class GracefulErrorHandler:
+#     def __init__(self):
+#         self.error_occurred = False
     
-    def handle_error(self, error_msg: str):
-        if not self.error_occurred:
-            st.error(f"⚠️ {error_msg}")
-            self.error_occurred = True
+#     def handle_error(self, error_msg: str):
+#         if not self.error_occurred:
+#             st.error(f"⚠️ {error_msg}")
+#             self.error_occurred = True
 
-error_handler = GracefulErrorHandler()
+# error_handler = GracefulErrorHandler()
 
 # Configure page
 st.set_page_config(
@@ -114,12 +114,12 @@ if st.session_state.get('authentication_status') is True:
         
         # Clear cache button
         if st.button("🔄 Clear Response Cache", use_container_width=True):
-            semantic_cache.clear_expired()
-            summary_cache.clear_old(days=7)
+            get_semantic_cache.clear_expired()
+            get_file_summary.clear_old(days=7)
             st.success("Cache cleared!")
 
     #Mainchat
-    st.title("🤖 StudyMate - Your AI Study Assistant")
+    st.title("🤖 StudyMate - Personal AI chatbot")
     
     # Info banner
     if WIKIPEDIA_AVAILABLE:

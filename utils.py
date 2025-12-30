@@ -1,12 +1,11 @@
-import os
-import json
-import hashlib
+import os, json, hashlib, shutil
 import numpy as np
 from pathlib import Path
 from typing import List, Dict, Optional, Tuple
 from dotenv import load_dotenv
 from datetime import datetime, timedelta
-import shutil
+from db import users_col, chats_col, semantic_cache_col, file_summary_col
+
 
 # File processing
 from PyPDF2 import PdfReader
@@ -51,253 +50,92 @@ genai.configure(api_key=GEMINI_KEY)
 
 EMBEDDINGS = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
 
-#Semantic Cache
-class OptimizedSemanticCache:
-    
-    def __init__(self, cache_dir: Path = CACHE_DIR, expiry_hours: int = 24, similarity_threshold: float = 0.85):
-        self.cache_dir = cache_dir
-        self.cache_file = cache_dir / "semantic_cache.json"
-        self.expiry_hours = expiry_hours
-        self.similarity_threshold = similarity_threshold
-        self.embeddings = EMBEDDINGS  
+#semantic cache helpers
+def embed_query(text: str) -> np.ndarray:
+    return np.array(EMBEDDINGS.embed_query(text.lower().strip()))
 
-        # In-memory caches for speed
-        self.cache = self._load_cache()
-        self._embedding_cache = {}  
-        self._context_groups = {}    
-        
-        # Build context groups on init
-        self._rebuild_context_groups()
-    
-    def _load_cache(self) -> Dict:
-        if self.cache_file.exists():
-            try:
-                with open(self.cache_file, 'r', encoding='utf-8') as f:
-                    return json.load(f)
-            except:
-                return {}
-        return {}
-    
-    def _save_cache(self):
-        with open(self.cache_file, 'w', encoding='utf-8') as f:
-            json.dump(self.cache, f, indent=2, ensure_ascii=False)
-    
-    def _get_embedding(self, text: str) -> np.ndarray:
-        text_key = text.lower().strip()
-        
-        # Check memory cache first
-        if text_key in self._embedding_cache:
-            return self._embedding_cache[text_key]
-        
-        embedding = np.array(self.embeddings.embed_query(text_key))
-        
-        
-        if len(self._embedding_cache) < 1000:  # Limit to 1000 embeddings
-            self._embedding_cache[text_key] = embedding
-        
-        return embedding
-    
-    def _cosine_similarity(self, vec1: np.ndarray, vec2: np.ndarray) -> float:
-        return np.dot(vec1, vec2) / (np.linalg.norm(vec1) * np.linalg.norm(vec2))
-    
-    def _is_expired(self, timestamp: str) -> bool:
-        try:
-            cached_time = datetime.fromisoformat(timestamp)
-            return datetime.now() - cached_time > timedelta(hours=self.expiry_hours)
-        except:
-            return True
-    
-    def _create_context_hash(self, context: str) -> str:
-        context_key = context[:500].lower().strip()
-        return hashlib.md5(context_key.encode()).hexdigest()[:8]  # Use first 8 chars for speed
-    
-    def _rebuild_context_groups(self):
-        self._context_groups.clear()
-        
-        for cache_key, entry in self.cache.items():
-            context_hash = entry.get('context_hash', 'default')
-            if context_hash not in self._context_groups:
-                self._context_groups[context_hash] = []
-            self._context_groups[context_hash].append((cache_key, entry))
-    
-    def get(self, query: str, context: str = "") -> Optional[Tuple[str, float]]:
-        query_embedding = self._get_embedding(query)
-        context_hash = self._create_context_hash(context)
-        
-        # Get relevant entries from context group only
-        relevant_entries = self._context_groups.get(context_hash, [])
-        
-        if not relevant_entries:
-            return None
-        
-        best_match = None
-        best_similarity = 0.0
-        expired_keys = []
-        
-        # Batch process all embeddings in the group
-        for cache_key, entry in relevant_entries:
-            if self._is_expired(entry['timestamp']):
-                expired_keys.append(cache_key)
-                continue
-            
-            # Get cached embedding
-            cached_embedding = entry.get('embedding')
-            if cached_embedding is None:
-                continue
-            
-            cached_embedding = np.array(cached_embedding)
-            
-            # Calculate similarity
-            similarity = self._cosine_similarity(query_embedding, cached_embedding)
-            
-            # Perfect match
-            if similarity > 0.99:
-                return (entry['response'], similarity)
-            
-            # Track best match
-            if similarity > best_similarity and similarity >= self.similarity_threshold:
-                best_similarity = similarity
-                best_match = entry['response']
-        
-        # Clean up expired entries
-        if expired_keys:
-            for key in expired_keys:
-                if key in self.cache:
-                    del self.cache[key]
-            self._save_cache()
-            self._rebuild_context_groups()
-        
-        return (best_match, best_similarity) if best_match else None
-    
-    def set(self, query: str, response: str, context: str = ""):
-        # Generate unique key
-        cache_key = hashlib.md5(f"{query}{datetime.now().isoformat()}".encode()).hexdigest()
-        
-        # Get embedding
-        query_embedding = self._get_embedding(query)
-        context_hash = self._create_context_hash(context)
-        
-        # Store with list format for JSON serialization
-        self.cache[cache_key] = {
-            'query': query,
-            'response': response,
-            'embedding': query_embedding.tolist(),  # Convert numpy to list
-            'context_hash': context_hash,
-            'timestamp': datetime.now().isoformat()
+def cosine_similarity(vec1: np.ndarray, vec2: np.ndarray) -> float:
+    if np.linalg.norm(vec1) == 0 or np.linalg.norm(vec2) == 0:
+        return 0.0
+    return np.dot(vec1, vec2) / (np.linalg.norm(vec1) * np.linalg.norm(vec2))
+
+#semantic cache
+def get_semantic_cache(username: str,chat_name: str,query: str,threshold: float = 0.85) -> Optional[str]:
+
+    query_embedding = embed_query(query)
+
+    candidates = semantic_cache_col.find({
+        "username": username,
+        "chat_name": chat_name
+    })
+
+    best_response = None
+    best_score = 0.0
+
+    for doc in candidates:
+        cached_embedding = np.array(doc.get("embedding", []))
+        if cached_embedding.size == 0:
+            continue
+
+        score = cosine_similarity(query_embedding, cached_embedding)
+
+        if score > best_score:
+            best_score = score
+            best_response = doc["response"]
+
+    if best_score >= threshold:
+        print(f"[CACHE HIT][SEMANTIC] score={best_score:.2f} query='{query}'")
+        return best_response
+
+    print(f"[CACHE MISS][SEMANTIC] query='{query}'")
+    return None
+
+
+def set_semantic_cache(username: str,chat_name: str,query: str,response: str):
+    semantic_cache_col.insert_one({
+        "username": username,
+        "chat_name": chat_name,
+        "query": query,
+        "embedding": embed_query(query).tolist(),
+        "response": response,
+        "timestamp": datetime.utcnow()
+    })
+
+    print(f"[CACHE STORE][SEMANTIC] user={username}, chat={chat_name}, query='{query}'")
+
+# #file summary cache
+def set_file_summary(file_path: Path, summary: str, username: str):
+    file_hash = hashlib.md5(file_path.read_bytes()).hexdigest()
+
+    file_summary_col.update_one(
+        {"username": username, "file_path": str(file_path)},
+        {
+            "$set": {
+                "summary": summary,
+                "hash": file_hash,
+                "timestamp": datetime.utcnow()
+            }
+        },
+        upsert=True
+    )
+
+def get_file_summary(file_path: Path, username: str) -> Optional[str]:
+    file_hash = hashlib.md5(file_path.read_bytes()).hexdigest()
+
+    doc = file_summary_col.find_one(
+        {
+            "username": username,
+            "file_path": str(file_path),
+            "hash": file_hash
         }
-        
-        # Update context groups
-        if context_hash not in self._context_groups:
-            self._context_groups[context_hash] = []
-        self._context_groups[context_hash].append((cache_key, self.cache[cache_key]))
-        
-        # Save to disk
-        self._save_cache()
-        
-        if len(self.cache) > 500:  # Max 500 cached queries
-            self._trim_cache()
-    
-    def _trim_cache(self):
-        # Sort by timestamp and keep newest 400
-        sorted_entries = sorted(
-            self.cache.items(),
-            key=lambda x: x[1]['timestamp'],
-            reverse=True
-        )
-        
-        self.cache = dict(sorted_entries[:400])
-        self._save_cache()
-        self._rebuild_context_groups()
-    
-    def clear_expired(self) -> int:
-        expired_keys = [
-            key for key, value in self.cache.items()
-            if self._is_expired(value['timestamp'])
-        ]
-        
-        for key in expired_keys:
-            del self.cache[key]
-        
-        if expired_keys:
-            self._save_cache()
-            self._rebuild_context_groups()
-            # Clear memory cache to free space
-            self._embedding_cache.clear()
-        
-        return len(expired_keys)
+    )
 
-# Global cache instance
-semantic_cache = OptimizedSemanticCache()
+    if doc:
+        print(f"[CACHE HIT][SUMMARY] user={username}, file={file_path.name}")
+        return doc["summary"]
 
-#file summary cache
-class FileSummaryCache:
-    def __init__(self, cache_dir: Path = CACHE_DIR):
-        self.cache_dir = cache_dir
-        self.cache_file = cache_dir / "file_summaries.json"
-        self.cache = self._load_cache()
-    
-    def _load_cache(self) -> Dict:
-        if self.cache_file.exists():
-            try:
-                with open(self.cache_file, 'r', encoding='utf-8') as f:
-                    return json.load(f)
-            except:
-                return {}
-        return {}
-    
-    def _save_cache(self):
-        with open(self.cache_file, 'w', encoding='utf-8') as f:
-            json.dump(self.cache, f, indent=2, ensure_ascii=False)
-    
-    def _get_file_hash(self, file_path: Path) -> str:
-        try:
-            mtime = file_path.stat().st_mtime
-            return hashlib.md5(f"{file_path}{mtime}".encode()).hexdigest()
-        except:
-            return hashlib.md5(str(file_path).encode()).hexdigest()
-    
-    def get(self, file_path: Path) -> Optional[str]:
-        file_hash = self._get_file_hash(file_path)
-        cache_key = str(file_path)
-        
-        if cache_key in self.cache:
-            entry = self.cache[cache_key]
-            if entry.get('hash') == file_hash:
-                return entry.get('summary')
-        
-        return None
-    
-    def set(self, file_path: Path, summary: str):
-        file_hash = self._get_file_hash(file_path)
-        self.cache[str(file_path)] = {
-            'summary': summary,
-            'hash': file_hash,
-            'timestamp': datetime.now().isoformat()
-        }
-        self._save_cache()
-    
-    def clear_old(self, days: int = 7):
-        cutoff = datetime.now() - timedelta(days=days)
-        keys_to_remove = []
-        
-        for key, entry in self.cache.items():
-            try:
-                timestamp = datetime.fromisoformat(entry['timestamp'])
-                if timestamp < cutoff:
-                    keys_to_remove.append(key)
-            except:
-                keys_to_remove.append(key)
-        
-        for key in keys_to_remove:
-            del self.cache[key]
-        
-        if keys_to_remove:
-            self._save_cache()
-        
-        return len(keys_to_remove)
-
-#global summary cache
-summary_cache = FileSummaryCache()
+    print(f"[CACHE MISS][SUMMARY] user={username}, file={file_path.name}")
+    return None
 
 #wikipedia
 def search_wikipedia(query: str, sentences: int = 3) -> str:
@@ -333,7 +171,6 @@ def get_user_dirs(username: str):
     return {
         'upload_dir': user_dir / "uploads",
         'index_dir': user_dir / "indexes",
-        'chat_dir': user_dir / "chats"
     }
 
 def init_user_dirs(username: str):
@@ -434,60 +271,6 @@ def extract_text_from_file(file_path: Path) -> str:
     
     return ""
 
-#file summary
-def summarize_file(file_name: str, chat_name: str, username: str) -> str:
-    dirs = get_user_dirs(username)
-    file_path = dirs['upload_dir'] / chat_name / file_name
-    
-    if not file_path.exists():
-        return f"Error: File '{file_name}' not found."
-    
-    # Check cache first
-    cached_summary = summary_cache.get(file_path)
-    if cached_summary:
-        return cached_summary
-    
-    # Extract text from file
-    try:
-        text_content = extract_text_from_file(file_path)
-        
-        if not text_content or text_content.strip() == "":
-            return f"Error: No content could be extracted from '{file_name}'."
-        
-        # Truncate if too long (Gemini has token limits)
-        max_chars = 30000
-        if len(text_content) > max_chars:
-            text_content = text_content[:max_chars] + "\n\n[Content truncated for length...]"
-        
-        # Create summarization prompt
-        prompt = f"""You are an expert study assistant. Please provide a comprehensive summary of the following document.
-
-                Document: {file_name}
-
-                Content:
-                {text_content}
-
-                Please provide:
-                1. A brief overview (2-3 sentences)
-                2. Key points and main topics covered
-                3. Important concepts or definitions
-                4. Any notable data, figures, or conclusions
-
-                Make the summary clear, well-structured, and educational."""
-
-        # Call Gemini for summarization
-        model = genai.GenerativeModel('gemini-2.5-flash-lite')
-        response = model.generate_content(prompt)
-        summary = response.text
-        
-        # Cache the summary
-        summary_cache.set(file_path, summary)
-        
-        return summary
-        
-    except Exception as e:
-        return f"Error generating summary for '{file_name}': {str(e)}"
-
 #file management
 def save_uploaded_files(uploaded_files, chat_name: str, username: str) -> List[str]:
     saved = []
@@ -553,6 +336,61 @@ def load_index(chat_name: str, username: str):
             return None
     return None
 
+#file summary
+def summarize_file(file_name: str, chat_name: str, username: str) -> str:
+    dirs = get_user_dirs(username)
+    file_path = dirs['upload_dir'] / chat_name / file_name
+    
+    if not file_path.exists():
+        return f"Error: File '{file_name}' not found."
+    
+    # Check cache first
+    cached_summary = get_file_summary(file_path, username)
+    if cached_summary:
+        return cached_summary
+    
+    # Extract text from file
+    try:
+        text_content = extract_text_from_file(file_path)
+        
+        if not text_content or text_content.strip() == "":
+            return f"Error: No content could be extracted from '{file_name}'."
+        
+        # Truncate if too long (Gemini has token limits)
+        max_chars = 30000
+        if len(text_content) > max_chars:
+            text_content = text_content[:max_chars] + "\n\n[Content truncated for length...]"
+        
+        # Create summarization prompt
+        prompt = f"""You are an expert study assistant. Please provide a comprehensive summary of the following document.
+
+                Document: {file_name}
+
+                Content:
+                {text_content}
+
+                Please provide:
+                1. A brief overview (2-3 sentences)
+                2. Key points and main topics covered
+                3. Important concepts or definitions
+                4. Any notable data, figures, or conclusions
+
+                Make the summary clear, well-structured, and educational."""
+
+        # Call Gemini for summarization
+        model = genai.GenerativeModel('gemini-2.5-flash-lite')
+        response = model.generate_content(prompt)
+        summary = response.text
+        
+        # Cache the summary
+        set_file_summary(file_path, summary, username)
+        print(f"[CACHE STORE][SUMMARY] user={username}, file={file_path.name}")
+        
+        return summary
+        
+    except Exception as e:
+        return f"Error generating summary for '{file_name}': {str(e)}"
+
 #generate response
 def get_ai_response(query: str, chat_name: str, chat_history: List[Dict], username: str) -> str:  
     # Retrieve context from FAISS
@@ -579,10 +417,17 @@ def get_ai_response(query: str, chat_name: str, chat_history: List[Dict], userna
     context = "\n".join(context_parts)
     
     # Check semantic cache first (now truly semantic!)
-    cache_result = semantic_cache.get(query, context)
-    if cache_result:
-        response, similarity = cache_result
-        return f"{response}\n\n*[Cached response - {similarity:.1%} match]*"
+    semantic_key = hashlib.md5(
+    f"{username}:{chat_name}:{query.lower().strip()}".encode()).hexdigest()
+
+    cached_response = get_semantic_cache(
+        username,
+        chat_name,
+        query
+    )
+    if cached_response:
+        return f"{cached_response}\n\n*[Cached response]*"
+    
     
     # Search Wikipedia if no files context
     wiki_info = ""
@@ -608,7 +453,8 @@ def get_ai_response(query: str, chat_name: str, chat_history: List[Dict], userna
         result = response.text
         
         # Cache the response with semantic matching
-        semantic_cache.set(query, result, context)
+        set_semantic_cache(username, chat_name, query, result)
+        print(f"[CACHE STORE][SEMANTIC] user={username}, chat={chat_name}, query='{query}'")
         
         return result
     except Exception as e:
@@ -704,53 +550,58 @@ def generate_quiz_for_chat(chat_name: str, chat_history: List[Dict], username: s
 
 #save chats
 def list_chats(username: str) -> List[str]:
-    dirs = get_user_dirs(username)
-    chat_dir = dirs['chat_dir']
-    if chat_dir.exists():
-        return sorted([f.stem for f in chat_dir.glob("*.json")])
-    return []
+    return sorted([
+        c["chat_name"]
+        for c in chats_col.find(
+            {"username": username},
+            {"chat_name": 1, "_id": 0}
+        )
+    ])
 
 def save_chat(chat_name: str, messages: List[Dict], files: List[str], username: str):
-    # Move temp data chat
     move_temp_to_chat(chat_name, username)
-    
-    dirs = init_user_dirs(username)
-    chat_path = dirs['chat_dir'] / f"{chat_name}.json"
-    data = {
-        "messages": messages,
-        "files": files
-    }
-    with open(chat_path, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2, ensure_ascii=False)
+
+    chats_col.update_one(
+        {"username": username, "chat_name": chat_name},
+        {
+            "$set": {
+                "messages": messages,
+                "files": files,
+                "updated_at": datetime.utcnow()
+            }
+        },
+        upsert=True
+    )
 
 def load_chat(chat_name: str, username: str) -> Dict:
-    dirs = get_user_dirs(username)
-    chat_path = dirs['chat_dir'] / f"{chat_name}.json"
-    if chat_path.exists():
-        with open(chat_path, "r", encoding="utf-8") as f:
-            return json.load(f)
-    return {"messages": [], "files": []}
+    chat = chats_col.find_one(
+        {"username": username, "chat_name": chat_name},
+        {"_id": 0}
+    )
+    return chat or {"messages": [], "files": []}
 
 def delete_chat(chat_name: str, username: str):
+    chats_col.delete_one(
+        {"username": username, "chat_name": chat_name}
+    )
+
+    # still delete files + FAISS locally
     dirs = get_user_dirs(username)
-    
-    # Delete chat file
-    chat_path = dirs['chat_dir'] / f"{chat_name}.json"
-    if chat_path.exists():
-        chat_path.unlink()
-    
-    # Delete uploaded files
+
     upload_path = dirs['upload_dir'] / chat_name
     if upload_path.exists():
         shutil.rmtree(upload_path)
-    
-    # Delete index
+
     index_path = dirs['index_dir'] / chat_name
     if index_path.exists():
         shutil.rmtree(index_path)
 
 def remove_file_from_chat(chat_name: str, file_name: str, username: str):
-    dirs = get_user_dirs(username)
-    file_path = dirs['upload_dir'] / chat_name / file_name
+    chats_col.update_one(
+        {"username": username, "chat_name": chat_name},
+        {"$pull": {"files": file_name}}
+    )
+
+    file_path = get_user_dirs(username)['upload_dir'] / chat_name / file_name
     if file_path.exists():
         file_path.unlink()
