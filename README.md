@@ -144,7 +144,7 @@ The app also applies summary caching for uploaded documents.
 
 When a file is uploaded and summarized for the first time, its summary is:
 
-- Stored locally in the cache
+- Stored locally in the cache (Could upgrade to a **MongoDB Cluster** for storing) 
 - Reused whenever needed again in the future
 
 If the same file is reopened or referenced again:
@@ -179,7 +179,7 @@ Do not mix unrelated files (e.g., Physics + History) into the same chat, for bet
 
 ## Troubleshooting
 
--  API key missing: If the app raises `API_KEY not found`, create a `.env` file or set the environment variable before starting Streamlit.
+- API key missing: If the app raises `API_KEY not found`, create a `.env` file or set the environment variable before starting Streamlit.
 - File extraction errors: Some PDFs or office files may fail to extract; the app returns an extraction error string. Re-check the file or try exporting text manually.
 - FAISS load/save issues: Index corruption or incompatible versions may cause failures when loading. Deleting the folder under `data/indexes/<chat_name>/` and rebuilding the index usually fixes the issue.
 - Large documents: For very large documents, consider splitting them manually or increase chunk sizes in `utils.py` cautiously.
