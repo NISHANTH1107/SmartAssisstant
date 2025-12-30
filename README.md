@@ -7,6 +7,7 @@ Key goals:
 - Fast, privacy-respecting document Q&A for study material
 - Simple Streamlit UI for uploading files, saving chats, and generating quizzes
 - Local FAISS index per chat for efficient retrieval
+- MongoDB Cluster for storing the chat data efficiently.
 
 ---
 
@@ -24,7 +25,8 @@ Key goals:
 ## Requirements
 
 - Python 3.10 or newer
-- A valid Google  API key (set as `API_KEY` in a `.env` file)
+- A valid Google  API key (set as `API_KEY` in the `.env` file)
+- MongoDB Cluster Connection URL for DB (set as `MONGO_URI` in the `.env` file)
 
 See `requirements.txt` for the Python packages used by the project.
 
@@ -34,13 +36,14 @@ See `requirements.txt` for the Python packages used by the project.
 | --- | --- |
 | Frontend | Streamlit (UI Rendering), Python |
 | Backend / App Logic | Python, Streamlit Server, Custom Utility Modules (`utils.py`) |
+| Database | MongoDB Atlas Cluster |
 | LLM Provider | Google Generative AI (`google-generativeai`) |
 | RAG Pipeline | LangChain (document loaders, text splitting, regex-based chunking, retrieval pipeline) |
 | Embeddings | HuggingFace Sentence Transformers (`sentence-transformers`) |
-| Vector Index (Retrieval) | FAISS (Local, per-chat vector store) |
+| Vector Index (Retrieval) | FAISS (Local `data/`,`chats/`,`indexes/`, per-chat vector store) |
 | Caching | Semantic Cache (smart response reuse), Summary Cache (document-level caching) |
 | File Processing | PyPDF2, python-docx, python-pptx, pandas, xlrd/openpyxl |
-| Storage | Local file storage under `data/` (`uploads/`, `indexes/`, `chats/`, `cache/`) |
+| Storage | MongoDB Atlas Cluster `StudyMate/` (`users/`, `chats/`, `file_summaries/`, `semantic_cache/`) |
 | Environment Management | `python-dotenv` |
 | Styling / UI | Streamlit Components |
 | Language | Python 3.10+ |
@@ -74,7 +77,13 @@ pip install -r requirements.txt
 API_KEY = "your__api_key_here"
 ```
 
-5. Run the app:
+5. Create a Cluster in MongoDB and get the connection string:
+
+```text
+MONGO_URI = "mongodb+srv://<username>:<password>@<clusterName>"
+```
+
+6. Run the app:
 
 ```cmd
 streamlit run main.py
@@ -87,6 +96,7 @@ Open the displayed local URL in your browser. Upload files, ask questions, and s
 ## Configuration
 
 - API key: The app expects `API_KEY` to be available via environment variables or a `.env` file (the project uses `python-dotenv`).
+- MongoDB: Get the connection string and replace the `password` with original ket and place it in the `.env` file
 - Embeddings: The app uses a Hugging Face sentence-transformer model via `HuggingFaceEmbeddings`.
 - Index storage: FAISS indexes and uploaded files are stored under `data/indexes/` and `data/uploads/` respectively.
 
@@ -98,6 +108,7 @@ Do not commit your `.env` file or API keys to version control.
 
 - `main.py` — Streamlit app and UI.
 - `utils.py` — Core utilities: file extraction, FAISS index build/load,  calls, chat persistence, and quiz generation.
+- `db.py` — Handles the Creation of `StudyMate` Schema in Mongo Cluster.
 - `requirements.txt` — Python dependencies.
 - `data/` — Application data: `uploads/`, `indexes/`, and `chats/`.
 
@@ -144,7 +155,7 @@ The app also applies summary caching for uploaded documents.
 
 When a file is uploaded and summarized for the first time, its summary is:
 
-- Stored locally in the cache (Could upgrade to a **MongoDB Cluster** for storing) 
+- Stored in Mongo Cluster under `file_summaries` document.
 - Reused whenever needed again in the future
 
 If the same file is reopened or referenced again:
@@ -193,6 +204,7 @@ If you hit other issues, open an issue (PR's will be actively reviewed) or inspe
 
 - Uploaded documents and generated indexes are stored locally under `data/`. If you share the repository, remove `data/` or sensitive files first.
 - Keep API keys private and never commit `.env` files.
+- Use a `.gitignore` file for achieving this safety.
 
 ---
 
