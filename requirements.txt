@@ -4,7 +4,6 @@ wikipedia
 PyPDF2
 python-docx
 python-pptx
-dotenv
 langchain
 sentence-transformers
 faiss-cpu
@@ -15,9 +14,7 @@ openai
 openpyxl
 pandas
 wikipedia
-shutil
 numpy
-pandas
 hashlib
 json
 streamlit_authenticator
